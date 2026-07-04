@@ -1,0 +1,42 @@
+namespace KinnectorConfig;
+
+table Metadata {
+    platform: string;
+    baseline_version: string;
+}
+
+table PathExclusion {
+    path_prefix: string;
+}
+
+table TrustedSigner {
+    signer_name: string;
+    team_id: string;
+}
+
+table TrustedCLI {
+    binary_path: string;
+    category_flags: uint;
+}
+
+table NetworkCDN {
+    domain_suffix: string;
+}
+
+table SensitiveFile {
+    file_path: string;
+    category_flags: uint;
+}
+
+table RulesDatabase {
+    version: uint;
+    epoch_timestamp: ulong;
+    metadata: Metadata;
+    exclusions: [PathExclusion];
+    trusted_signers: [TrustedSigner];
+    trusted_clis: [TrustedCLI];
+    network_cdns: [NetworkCDN];
+    sensitive_files: [SensitiveFile];
+}
+
+root_type RulesDatabase;
