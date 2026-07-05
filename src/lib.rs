@@ -13,6 +13,11 @@ pub enum Category {
     Wallet = 0x04,
     AppData = 0x08,
     SshKeys = 0x10,
+    // Server-specific categories (warden)
+    WebProcess      = 0x20,
+    SystemUpdate    = 0x40,
+    PersistencePath = 0x80,
+    ProtectedBinary = 0x100,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +35,10 @@ struct ConfigState {
     trusted_clis: HashMap<String, u32>,
     network_cdns: Vec<String>,
     sensitive_files: HashMap<String, u32>,
+    web_processes:       Vec<String>,
+    persistence_paths:   Vec<String>,
+    protected_binaries:  Vec<String>,
+    terminal_rce_patterns: Vec<String>,
 }
 
 pub struct ConfigManager {
@@ -52,6 +61,10 @@ impl ConfigManager {
                 trusted_clis: HashMap::new(),
                 network_cdns: Vec::new(),
                 sensitive_files: HashMap::new(),
+                web_processes: Vec::new(),
+                persistence_paths: Vec::new(),
+                protected_binaries: Vec::new(),
+                terminal_rce_patterns: Vec::new(),
             })),
         };
         manager.reload()?;
@@ -134,6 +147,43 @@ impl ConfigManager {
             }
         }
 
+        // Server-security defaults — these would come from FlatBuffers in a future schema update
+        let web_processes = vec![
+            "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
+            "caddy".to_string(), "php-fpm".to_string(), "node".to_string(),
+            "python3".to_string(), "python".to_string(), "ruby".to_string(),
+            "java".to_string(), "gunicorn".to_string(), "uvicorn".to_string(),
+            "uwsgi".to_string(), "lighttpd".to_string(),
+        ];
+
+        let persistence_paths = vec![
+            "/etc/cron.d".to_string(), "/etc/cron.daily".to_string(),
+            "/etc/cron.hourly".to_string(), "/etc/cron.weekly".to_string(),
+            "/etc/cron.monthly".to_string(), "/var/spool/cron".to_string(),
+            "/etc/systemd/system".to_string(), "/usr/lib/systemd/system".to_string(),
+            "/etc/profile.d".to_string(), "/etc/rc.d".to_string(),
+            "/etc/init.d".to_string(), "/etc/rc.local".to_string(),
+            "/root/.bashrc".to_string(), "/root/.bash_profile".to_string(),
+            "/etc/bash.bashrc".to_string(),
+        ];
+
+        let protected_binaries = vec![
+            "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
+            "php-fpm".to_string(), "sshd".to_string(), "cron".to_string(),
+            "systemd".to_string(), "init".to_string(),
+        ];
+
+        let terminal_rce_patterns = vec![
+            "wget ".to_string(), "curl ".to_string(), "nc ".to_string(),
+            "netcat".to_string(), "ncat".to_string(), "bash -i".to_string(),
+            "/dev/tcp/".to_string(), "/dev/udp/".to_string(),
+            "python -c".to_string(), "python3 -c".to_string(),
+            "perl -e".to_string(), "ruby -e".to_string(),
+            "php -r".to_string(), "base64 -d".to_string(),
+            "chmod +x".to_string(), "chmod 777".to_string(),
+            "mkfifo".to_string(), "LD_PRELOAD".to_string(),
+        ];
+
         // 5. Atomic swap
         let mut state = self.state.write().unwrap();
         *state = ConfigState {
@@ -144,6 +194,10 @@ impl ConfigManager {
             trusted_clis,
             network_cdns,
             sensitive_files,
+            web_processes,
+            persistence_paths,
+            protected_binaries,
+            terminal_rce_patterns,
         };
 
         Ok(())
@@ -209,6 +263,75 @@ impl ConfigManager {
     pub fn sensitive_files(&self) -> HashMap<String, u32> {
         let state = self.state.read().unwrap();
         state.sensitive_files.clone()
+    }
+
+    pub fn is_web_process(&self, exe: &str) -> bool {
+        let state = self.state.read().unwrap();
+        let exe_lower = exe.to_lowercase();
+        state.web_processes.iter().any(|w| exe_lower.contains(w.as_str()))
+    }
+
+    pub fn web_processes(&self) -> Vec<String> {
+        self.state.read().unwrap().web_processes.clone()
+    }
+
+    pub fn is_persistence_path(&self, path: &str) -> bool {
+        let state = self.state.read().unwrap();
+        state.persistence_paths.iter().any(|p| path.starts_with(p.as_str()))
+    }
+
+    pub fn is_protected_binary(&self, path: &str) -> bool {
+        let state = self.state.read().unwrap();
+        let path_lower = path.to_lowercase();
+        state.protected_binaries.iter().any(|b| {
+            path_lower == b.as_str() || path_lower.ends_with(&format!("/{}", b))
+        })
+    }
+
+    pub fn terminal_rce_patterns(&self) -> Vec<String> {
+        self.state.read().unwrap().terminal_rce_patterns.clone()
+    }
+
+    pub fn load_defaults() -> Self {
+        ConfigManager {
+            path: String::new(),
+            public_key: [0u8; 32],
+            state: Arc::new(RwLock::new(ConfigState {
+                version: 0,
+                epoch_timestamp: 0,
+                exclusions: Vec::new(),
+                trusted_signers: std::collections::HashSet::new(),
+                trusted_clis: std::collections::HashMap::new(),
+                network_cdns: Vec::new(),
+                sensitive_files: std::collections::HashMap::new(),
+                web_processes: vec![
+                    "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
+                    "caddy".to_string(), "php-fpm".to_string(), "node".to_string(),
+                    "python3".to_string(), "python".to_string(), "ruby".to_string(),
+                    "java".to_string(), "gunicorn".to_string(), "uvicorn".to_string(),
+                    "uwsgi".to_string(), "lighttpd".to_string(),
+                ],
+                persistence_paths: vec![
+                    "/etc/cron.d".to_string(), "/etc/cron.daily".to_string(),
+                    "/etc/cron.hourly".to_string(), "/etc/cron.weekly".to_string(),
+                    "/var/spool/cron".to_string(), "/etc/systemd/system".to_string(),
+                    "/usr/lib/systemd/system".to_string(), "/etc/profile.d".to_string(),
+                    "/etc/init.d".to_string(), "/root/.bashrc".to_string(),
+                ],
+                protected_binaries: vec![
+                    "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
+                    "php-fpm".to_string(), "sshd".to_string(), "cron".to_string(),
+                ],
+                terminal_rce_patterns: vec![
+                    "wget ".to_string(), "curl ".to_string(), "nc ".to_string(),
+                    "netcat".to_string(), "bash -i".to_string(),
+                    "/dev/tcp/".to_string(), "python -c".to_string(),
+                    "python3 -c".to_string(), "perl -e".to_string(),
+                    "base64 -d".to_string(), "chmod +x".to_string(),
+                    "mkfifo".to_string(), "LD_PRELOAD".to_string(),
+                ],
+            })),
+        }
     }
 }
 
