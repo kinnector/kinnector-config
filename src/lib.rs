@@ -75,7 +75,10 @@ impl ConfigManager {
         let mut file = File::open(&self.path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
+        self.reload_from_bytes(&buffer)
+    }
 
+    pub fn reload_from_bytes(&self, buffer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         if buffer.len() < 80 {
             return Err("Config file too small".into());
         }
