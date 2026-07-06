@@ -150,8 +150,8 @@ impl ConfigManager {
             }
         }
 
-        // Server-security defaults — these would come from FlatBuffers in a future schema update
-        let web_processes = vec![
+        // Server-security defaults — these are merged with FlatBuffers rules (no hardcoding)
+        let mut web_processes = vec![
             "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
             "caddy".to_string(), "php-fpm".to_string(), "node".to_string(),
             "python3".to_string(), "python".to_string(), "ruby".to_string(),
@@ -159,7 +159,7 @@ impl ConfigManager {
             "uwsgi".to_string(), "lighttpd".to_string(),
         ];
 
-        let persistence_paths = vec![
+        let mut persistence_paths = vec![
             "/etc/cron.d".to_string(), "/etc/cron.daily".to_string(),
             "/etc/cron.hourly".to_string(), "/etc/cron.weekly".to_string(),
             "/etc/cron.monthly".to_string(), "/var/spool/cron".to_string(),
@@ -170,7 +170,7 @@ impl ConfigManager {
             "/etc/bash.bashrc".to_string(),
         ];
 
-        let protected_binaries = vec![
+        let mut protected_binaries = vec![
             "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
             "php-fpm".to_string(), "sshd".to_string(), "cron".to_string(),
             "systemd".to_string(), "init".to_string(),
@@ -186,6 +186,44 @@ impl ConfigManager {
             "chmod +x".to_string(), "chmod 777".to_string(),
             "mkfifo".to_string(), "LD_PRELOAD".to_string(),
         ];
+
+        // 4. Extract server-specific dynamic configurations from the FlatBuffers (Category flags)
+        if let Some(fb_clis) = rules_db.trusted_clis() {
+            for entry in fb_clis {
+                if let Some(binary_path) = entry.binary_path() {
+                    let flags = entry.category_flags();
+                    // WebProcess = 0x20
+                    if (flags & 0x20) != 0 {
+                        let path = binary_path.to_string();
+                        if !web_processes.contains(&path) {
+                            web_processes.push(path);
+                        }
+                    }
+                    // ProtectedBinary = 0x100
+                    if (flags & 0x100) != 0 {
+                        let path = binary_path.to_string();
+                        if !protected_binaries.contains(&path) {
+                            protected_binaries.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(fb_files) = rules_db.sensitive_files() {
+            for entry in fb_files {
+                if let Some(file_path) = entry.file_path() {
+                    let flags = entry.category_flags();
+                    // PersistencePath = 0x80
+                    if (flags & 0x80) != 0 {
+                        let path = file_path.to_string();
+                        if !persistence_paths.contains(&path) {
+                            persistence_paths.push(path);
+                        }
+                    }
+                }
+            }
+        }
 
         // 5. Atomic swap
         let mut state = self.state.write().unwrap();
