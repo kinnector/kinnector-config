@@ -9,15 +9,17 @@ use ed25519_dalek::{VerifyingKey, Signature, Verifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
-    BrowserDb = 0x01,
-    Wallet = 0x04,
-    AppData = 0x08,
-    SshKeys = 0x10,
+    BrowserDb       = 0x01,
+    Wallet          = 0x04,
+    AppData         = 0x08,
+    SshKeys         = 0x10,
+    UserKeystores   = 0x20,
+    AiAgents        = 0x40,
     // Server-specific categories (warden)
-    WebProcess      = 0x20,
-    SystemUpdate    = 0x40,
-    PersistencePath = 0x80,
-    ProtectedBinary = 0x100,
+    WebProcess      = 0x80,
+    SystemUpdate    = 0x100,
+    PersistencePath = 0x200,
+    ProtectedBinary = 0x400,
 }
 
 #[derive(Debug, Clone)]
@@ -192,15 +194,15 @@ impl ConfigManager {
             for entry in fb_clis {
                 if let Some(binary_path) = entry.binary_path() {
                     let flags = entry.category_flags();
-                    // WebProcess = 0x20
-                    if (flags & 0x20) != 0 {
+                    // WebProcess = 0x80
+                    if (flags & 0x80) != 0 {
                         let path = binary_path.to_string();
                         if !web_processes.contains(&path) {
                             web_processes.push(path);
                         }
                     }
-                    // ProtectedBinary = 0x100
-                    if (flags & 0x100) != 0 {
+                    // ProtectedBinary = 0x400
+                    if (flags & 0x400) != 0 {
                         let path = binary_path.to_string();
                         if !protected_binaries.contains(&path) {
                             protected_binaries.push(path);
@@ -214,8 +216,8 @@ impl ConfigManager {
             for entry in fb_files {
                 if let Some(file_path) = entry.file_path() {
                     let flags = entry.category_flags();
-                    // PersistencePath = 0x80
-                    if (flags & 0x80) != 0 {
+                    // PersistencePath = 0x200
+                    if (flags & 0x200) != 0 {
                         let path = file_path.to_string();
                         if !persistence_paths.contains(&path) {
                             persistence_paths.push(path);
@@ -510,6 +512,8 @@ pub unsafe extern "C" fn kinnector_config_is_trusted_cli(
         0x04 => Category::Wallet,
         0x08 => Category::AppData,
         0x10 => Category::SshKeys,
+        0x20 => Category::UserKeystores,
+        0x40 => Category::AiAgents,
         _ => return false,
     };
 

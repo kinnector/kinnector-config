@@ -39,6 +39,10 @@ fn parse_single_flag(s: &str) -> u32 {
         "sshkeys" | "ssh_keys" | "ssh" => 0x10,
         "userkeystores" | "user_keystores" | "keystores" | "keystore" => 0x20,
         "aiagents" | "ai_agents" | "agents" | "agent" => 0x40,
+        "webprocess" | "web_process" | "web" => 0x80,
+        "systemupdate" | "system_update" | "update" => 0x100,
+        "persistencepath" | "persistence_path" | "persistence" => 0x200,
+        "protectedbinary" | "protected_binary" | "protected" => 0x400,
         _ => {
             println!("[Policy Compiler] Warning: Unknown flag category '{}'. Defaulting to 0.", s);
             0
