@@ -1,6 +1,6 @@
 # kinnector-config
 
-A high-performance Rust and C++ configuration and rule loading library for the Kinnector EDR. It parses, cryptographically validates, and queries rules compiled from the `kinnector-protect-community` repository.
+A high-performance Rust and C++ configuration and rule loading library for the **kinnector** EDR. It parses, cryptographically validates, and queries rules compiled from the `kinnector-protect-community` repository.
 
 ## Features
 
