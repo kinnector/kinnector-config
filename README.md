@@ -1,64 +1,77 @@
-# kinnector-config
+# Kinnector Config
 
-A high-performance Rust and C++ configuration and rule loading library for the **kinnector** EDR. It parses, cryptographically validates, and queries rules compiled from the `kinnector-protect-community` repository.
+Kinnector Config is a high-performance configuration and security policy loading library, providing native Rust APIs and dynamic C++ bindings (`libkinnector_config`). It parses, cryptographically validates, and queries security rules compiled from the Kinnector rules database.
 
-## Features
+---
 
-- **Multi-Language Interfaces**: Native Rust API and dynamic C++ bindings (`libkinnector_config`).
-- **Signature Verification**: Verifies signed rule databases using Ed25519 before loading.
-- **Zero-Allocation Hot Path**: Optimized lookups for path exclusions, trusted signers, and CLI rules.
-- **Atomic Hot-Reloading**: Reloads rules in-memory using atomic pointers without blocking hot telemetry paths.
+## Why this exists
+
+EDR engines evaluate rules on hot telemetry paths where event throughput is high. Parsing text-based configuration formats (such as JSON or YAML) during runtime adds memory allocations and latency, bottlenecking the system.
+
+Kinnector Config solves this by loading pre-compiled, cryptographically signed rules databases (serialized with FlatBuffers). It performs lookups using zero-allocation data structures, ensuring rule checking does not introduce latency into the telemetry loop.
+
+---
+
+## Mental Model and Hot-Reloading
+
+```
+[ rules.db File ] ──(Ed25519 Validation)──> [ FlatBuffers Memory Map ] ──(Atomic Swap)──> [ Active Engine Referencer ]
+```
+
+At startup, the database is verified using Ed25519 signatures. Once verified, it is mapped directly into memory. To update rules without stopping the daemon or losing telemetry events, the library supports atomic hot-reloading: new databases are parsed and validated in-memory asynchronously, then hot-swapped into the execution thread using lock-free atomic pointers.
 
 ---
 
 ## Build Requirements
 
-- Rust 1.75+ (Cargo)
-- CMake 3.20+ (for C++ builds)
-- Clang / GCC (supporting C++20)
+* Rust 1.75+ (Cargo)
+* CMake 3.20+ (for C++ dynamic library builds)
+* Clang or GCC supporting C++20
 
 ---
 
 ## Rust Usage
 
-Add the dependency to your `Cargo.toml`:
+Add the library to your `Cargo.toml` dependency definitions:
 
 ```toml
 [dependencies]
 kinnector-config = { path = "../kinnector-config" }
 ```
 
-### Example: Checking Exclusions and Trusted Signers
+### Example: Checking Exclusions, Vendors, and CLI Rules
 
 ```rust
 use std::path::Path;
 use kinnector_config::{ConfigManager, Category, SignerInfo};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize the config manager and load a signed rule database
-    let public_key_bytes = [0u8; 32]; // Replace with actual public key
+    // Initialize manager and cryptographically validate the rules database
+    let public_key_bytes = [0u8; 32]; // Replace with actual Ed25519 public key
     let manager = ConfigManager::load("/etc/kinnector/rules.db", &public_key_bytes)?;
 
-    // Hot-path check if path is excluded
-    if manager.is_path_excluded(Path::new("/home/user/workspace/test.rs")) {
+    // Check if a path is excluded from monitoring
+    if manager.is_path_excluded(Path::new("/home/user/workspace/build/out.o")) {
         println!("Path is excluded");
     }
 
-    // Check if a process signature is an approved vendor
+    // Check if a process publisher is trusted
     let signer = SignerInfo {
         signer_name: "Google LLC".to_string(),
         team_id: Some("EQHXZ8M8AV".to_string()),
         is_signed: true,
     };
-    
     if manager.is_trusted_vendor(&signer) {
-        println!("Process is trusted vendor");
+        println!("Signer matches trusted allowlist");
     }
 
-    // Check if CLI tool is allowed to access specific category
+    // Validate if a CLI tool has permissions to access a telemetry category
     if manager.is_trusted_cli(Path::new("/usr/bin/ssh"), Category::SshKeys) {
-        println!("ssh is allowed to read SSH keys");
+        println!("ssh binary has explicit credentials access permission");
     }
+
+    // Hot-reload the rules database atomically
+    manager.reload()?;
 
     Ok(())
 }
@@ -68,9 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## C++ Usage
 
-Link against `libkinnector_config` and include `kinnector_config.h`.
+Link your project against `libkinnector_config` and include `kinnector_config.h`.
 
-### Example: Integration in C++ eBPF/Telemetry Collectors
+### Example: Verification inside eBPF Collectors
 
 ```cpp
 #include <iostream>
@@ -78,33 +91,33 @@ Link against `libkinnector_config` and include `kinnector_config.h`.
 #include "kinnector_config.h"
 
 int main() {
-    uint8_t public_key[32] = {0}; // Replace with actual public key
+    uint8_t public_key[32] = {0}; // Replace with actual Ed25519 public key
     
-    // Initialize configuration instance
+    // Load and validate the rules database
     kinnector_config_t* config = nullptr;
     int rc = kinnector_config_load("/etc/kinnector/rules.db", public_key, &config);
     if (rc != 0) {
-        std::cerr << "Failed to load rules database: " << rc << std::endl;
+        std::cerr << "Failed to validate database: " << rc << std::endl;
         return 1;
     }
 
-    // Hot-path exclusion lookup
-    const char* file_path = "/tmp/developer_workspace/build.o";
-    if (kinnector_config_is_path_excluded(config, file_path)) {
-        std::cout << "Path excluded" << std::endl;
+    // Lookup path exclusion on telemetry hot path
+    const char* path = "/tmp/development_build/out.o";
+    if (kinnector_config_is_path_excluded(config, path)) {
+        std::cout << "Telemetry path excluded" << std::endl;
     }
 
-    // Query trusted signer
+    // Query trusted vendor information
     signer_info_t signer = {};
     signer.signer_name = "Google LLC";
     signer.team_id = "EQHXZ8M8AV";
     signer.is_signed = true;
 
     if (kinnector_config_is_trusted_vendor(config, &signer)) {
-        std::cout << "Trusted vendor" << std::endl;
+        std::cout << "Publisher matches trusted vendor signatures" << std::endl;
     }
 
-    // Cleanup
+    // Free configuration resources
     kinnector_config_free(config);
     return 0;
 }
@@ -112,25 +125,13 @@ int main() {
 
 ---
 
-## Architecture & Database Schema
+## Database Binary Layout
 
-The library parses a binary payload containing serialized FlatBuffers tables:
+The compiled rules database payload uses FlatBuffers tables packed in the following order:
 
-1. **Header**: Cryptographic signature, database version, and epoch timestamp.
-2. **Metadata Table**: Target platform indicators and baseline version.
-3. **Exclusion List**: Prefix trees (trie) for path prefix matching.
-4. **Signer Allowlist**: Hash-sets of trusted publishers (Team IDs and Windows Authenticode Names).
-5. **Trusted CLI Registry**: Mappings of utility binaries to allowed `CategoryFlags`.
-6. **Network CDN Allowlist**: Wildcard domain suffix trees.
-
----
-
-## Configuration Updates
-
-To trigger an in-memory hot-swap of the active configuration:
-
-```rust
-// Reloads and validates the database at runtime.
-// Swaps the active pointer atomically.
-manager.reload()?;
-```
+1. **Header**: Cryptographic signature, version epoch, and database release metadata.
+2. **Metadata**: Targeted platform architectures and configuration flags.
+3. **Exclusion List**: Prefix trees (trie structures) for low-overhead path prefix matching.
+4. **Signer Allowlist**: Hash-sets of trusted team identifiers and Authenticode names.
+5. **Trusted CLI Registry**: Map of binary paths to permitted access categories.
+6. **Network CDN Allowlist**: Domain suffix trees for validation of network targets.
