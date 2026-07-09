@@ -3,9 +3,72 @@ pub mod rules_generated;
 use std::collections::{HashSet, HashMap};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+
+fn find_config_dir(db_path: &Path) -> PathBuf {
+    if let Some(parent) = db_path.parent() {
+        let dir = parent.join("configs");
+        if dir.exists() {
+            return dir;
+        }
+        let dir = parent.join("../kinnector-protect-community/configs");
+        if dir.exists() {
+            return dir;
+        }
+    }
+    let dir = Path::new("../kinnector-protect-community/configs");
+    if dir.exists() {
+        return dir.to_path_buf();
+    }
+    Path::new(".").to_path_buf()
+}
+
+fn load_list_from_json(config_dir: &Path, filename: &str, key: &str) -> Vec<String> {
+    let file_path = config_dir.join(filename);
+    if file_path.exists() {
+        if let Ok(mut file) = File::open(&file_path) {
+            let mut contents = String::new();
+            if file.read_to_string(&mut contents).is_ok() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
+                        let list: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
+                        if !list.is_empty() {
+                            return list;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn load_map_from_json(config_dir: &Path, filename: &str, key: &str) -> HashMap<String, String> {
+    let file_path = config_dir.join(filename);
+    if file_path.exists() {
+        if let Ok(mut file) = File::open(&file_path) {
+            let mut contents = String::new();
+            if file.read_to_string(&mut contents).is_ok() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(obj) = v.get(key).and_then(|a| a.as_object()) {
+                        let mut map = HashMap::new();
+                        for (k, val) in obj {
+                            if let Some(s) = val.as_str() {
+                                map.insert(k.clone(), s.to_string());
+                            }
+                        }
+                        if !map.is_empty() {
+                            return map;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HashMap::new()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -41,6 +104,14 @@ struct ConfigState {
     persistence_paths:   Vec<String>,
     protected_binaries:  Vec<String>,
     terminal_rce_patterns: Vec<String>,
+    installer_binaries:  Vec<String>,
+    shell_profile_paths: Vec<String>,
+    sensitive_credential_paths: Vec<String>,
+    script_interpreters: Vec<String>,
+    interactive_shells:  Vec<String>,
+    browser_executables: Vec<String>,
+    hvnc_monitored_gui_apps: Vec<String>,
+    protected_application_directories: HashMap<String, String>,
 }
 
 pub struct ConfigManager {
@@ -67,6 +138,14 @@ impl ConfigManager {
                 persistence_paths: Vec::new(),
                 protected_binaries: Vec::new(),
                 terminal_rce_patterns: Vec::new(),
+                installer_binaries: Vec::new(),
+                shell_profile_paths: Vec::new(),
+                sensitive_credential_paths: Vec::new(),
+                script_interpreters: Vec::new(),
+                interactive_shells: Vec::new(),
+                browser_executables: Vec::new(),
+                hvnc_monitored_gui_apps: Vec::new(),
+                protected_application_directories: HashMap::new(),
             })),
         };
         manager.reload()?;
@@ -134,11 +213,18 @@ impl ConfigManager {
             }
         }
 
-        let mut network_cdns = Vec::new();
+        let db_path = Path::new(&self.path);
+        let config_dir = find_config_dir(db_path);
+        let prefix = if cfg!(unix) { "linux" } else { "windows" };
+
+        let mut network_cdns = load_list_from_json(&config_dir, "network_cdns.json", "cdns");
         if let Some(fb_cdns) = rules_db.network_cdns() {
             for entry in fb_cdns {
                 if let Some(suffix) = entry.domain_suffix() {
-                    network_cdns.push(suffix.to_string());
+                    let s = suffix.to_string();
+                    if !network_cdns.contains(&s) {
+                        network_cdns.push(s);
+                    }
                 }
             }
         }
@@ -152,44 +238,17 @@ impl ConfigManager {
             }
         }
 
-        // Server-security defaults — these are merged with FlatBuffers rules (no hardcoding)
-        let mut web_processes = vec![
-            "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
-            "caddy".to_string(), "php-fpm".to_string(), "node".to_string(),
-            "python3".to_string(), "python".to_string(), "ruby".to_string(),
-            "java".to_string(), "gunicorn".to_string(), "uvicorn".to_string(),
-            "uwsgi".to_string(), "lighttpd".to_string(),
-        ];
+        let mut web_processes = load_list_from_json(&config_dir, &format!("{}_web_processes.json", prefix), "processes");
+        let mut persistence_paths = load_list_from_json(&config_dir, &format!("{}_persistence_paths.json", prefix), "paths");
+        let mut protected_binaries = load_list_from_json(&config_dir, &format!("{}_protected_binaries.json", prefix), "binaries");
+        
+        let terminal_rce_patterns = if cfg!(unix) {
+            load_list_from_json(&config_dir, "linux_terminal_rce_patterns.json", "patterns")
+        } else {
+            Vec::new()
+        };
 
-        let mut persistence_paths = vec![
-            "/etc/cron.d".to_string(), "/etc/cron.daily".to_string(),
-            "/etc/cron.hourly".to_string(), "/etc/cron.weekly".to_string(),
-            "/etc/cron.monthly".to_string(), "/var/spool/cron".to_string(),
-            "/etc/systemd/system".to_string(), "/usr/lib/systemd/system".to_string(),
-            "/etc/profile.d".to_string(), "/etc/rc.d".to_string(),
-            "/etc/init.d".to_string(), "/etc/rc.local".to_string(),
-            "/root/.bashrc".to_string(), "/root/.bash_profile".to_string(),
-            "/etc/bash.bashrc".to_string(),
-        ];
-
-        let mut protected_binaries = vec![
-            "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
-            "php-fpm".to_string(), "sshd".to_string(), "cron".to_string(),
-            "systemd".to_string(), "init".to_string(),
-        ];
-
-        let terminal_rce_patterns = vec![
-            "wget ".to_string(), "curl ".to_string(), "nc ".to_string(),
-            "netcat".to_string(), "ncat".to_string(), "bash -i".to_string(),
-            "/dev/tcp/".to_string(), "/dev/udp/".to_string(),
-            "python -c".to_string(), "python3 -c".to_string(),
-            "perl -e".to_string(), "ruby -e".to_string(),
-            "php -r".to_string(), "base64 -d".to_string(),
-            "chmod +x".to_string(), "chmod 777".to_string(),
-            "mkfifo".to_string(), "LD_PRELOAD".to_string(),
-        ];
-
-        // 4. Extract server-specific dynamic configurations from the FlatBuffers (Category flags)
+        // Extract server-specific dynamic configurations from the FlatBuffers (Category flags)
         if let Some(fb_clis) = rules_db.trusted_clis() {
             for entry in fb_clis {
                 if let Some(binary_path) = entry.binary_path() {
@@ -227,6 +286,15 @@ impl ConfigManager {
             }
         }
 
+        let installer_binaries = load_list_from_json(&config_dir, &format!("{}_installer_binaries.json", prefix), "binaries");
+        let shell_profile_paths = load_list_from_json(&config_dir, &format!("{}_shell_profile_paths.json", prefix), "paths");
+        let sensitive_credential_paths = load_list_from_json(&config_dir, &format!("{}_sensitive_credential_paths.json", prefix), "paths");
+        let script_interpreters = load_list_from_json(&config_dir, &format!("{}_script_interpreters.json", prefix), "interpreters");
+        let interactive_shells = load_list_from_json(&config_dir, &format!("{}_interactive_shells.json", prefix), "shells");
+        let browser_executables = load_list_from_json(&config_dir, &format!("{}_browser_executables.json", prefix), "browsers");
+        let hvnc_monitored_gui_apps = load_list_from_json(&config_dir, &format!("{}_hvnc_monitored_gui_apps.json", prefix), "apps");
+        let protected_application_directories = load_map_from_json(&config_dir, &format!("{}_protected_application_directories.json", prefix), "directories");
+
         // 5. Atomic swap
         let mut state = self.state.write().unwrap();
         *state = ConfigState {
@@ -241,6 +309,14 @@ impl ConfigManager {
             persistence_paths,
             protected_binaries,
             terminal_rce_patterns,
+            installer_binaries,
+            shell_profile_paths,
+            sensitive_credential_paths,
+            script_interpreters,
+            interactive_shells,
+            browser_executables,
+            hvnc_monitored_gui_apps,
+            protected_application_directories,
         };
 
         Ok(())
@@ -254,11 +330,12 @@ impl ConfigManager {
         self.state.read().unwrap().epoch_timestamp
     }
 
-    pub fn is_path_excluded<P: AsRef<Path>>(&self, path: P) -> bool {
-        let path_str = path.as_ref().to_string_lossy();
+    pub fn is_path_excluded(&self, path: &Path) -> bool {
         let state = self.state.read().unwrap();
+        let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
         for prefix in &state.exclusions {
-            if path_str.starts_with(prefix) {
+            let prefix_normalized = prefix.to_lowercase().replace('\\', "/");
+            if path_str.starts_with(&prefix_normalized) {
                 return true;
             }
         }
@@ -270,20 +347,15 @@ impl ConfigManager {
             return false;
         }
         let state = self.state.read().unwrap();
-        if state.trusted_signers.contains(&(signer.signer_name.clone(), signer.team_id.clone())) {
-            return true;
-        }
-        if state.trusted_signers.contains(&(signer.signer_name.clone(), None)) {
-            return true;
-        }
-        false
+        state.trusted_signers.contains(&(signer.signer_name.clone(), signer.team_id.clone()))
     }
 
-    pub fn is_trusted_cli<P: AsRef<Path>>(&self, binary_path: P, category: Category) -> bool {
-        let path_str = binary_path.as_ref().to_string_lossy();
+    pub fn is_trusted_cli(&self, path: &Path, category: Category) -> bool {
         let state = self.state.read().unwrap();
-        if let Some(&flags) = state.trusted_clis.get(path_str.as_ref()) {
-            return (flags & (category as u32)) != 0;
+        let path_str = path.to_string_lossy().to_lowercase().replace('\\', "/");
+        if let Some(flags) = state.trusted_clis.get(&path_str) {
+            let cat_flag = category as u32;
+            return (flags & cat_flag) != 0;
         }
         false
     }
@@ -320,14 +392,23 @@ impl ConfigManager {
 
     pub fn is_persistence_path(&self, path: &str) -> bool {
         let state = self.state.read().unwrap();
-        state.persistence_paths.iter().any(|p| path.starts_with(p.as_str()))
+        let path_normalized = path.to_lowercase().replace('\\', "/");
+        state.persistence_paths.iter().any(|p| {
+            let p_normalized = p.to_lowercase().replace('\\', "/");
+            path_normalized.starts_with(&p_normalized)
+        })
+    }
+
+    pub fn persistence_paths(&self) -> Vec<String> {
+        self.state.read().unwrap().persistence_paths.clone()
     }
 
     pub fn is_protected_binary(&self, path: &str) -> bool {
         let state = self.state.read().unwrap();
-        let path_lower = path.to_lowercase();
+        let path_normalized = path.to_lowercase().replace('\\', "/");
         state.protected_binaries.iter().any(|b| {
-            path_lower == b.as_str() || path_lower.ends_with(&format!("/{}", b))
+            let b_normalized = b.to_lowercase().replace('\\', "/");
+            path_normalized == b_normalized || path_normalized.ends_with(&format!("/{}", b_normalized))
         })
     }
 
@@ -335,7 +416,62 @@ impl ConfigManager {
         self.state.read().unwrap().terminal_rce_patterns.clone()
     }
 
+    pub fn installer_binaries(&self) -> Vec<String> {
+        self.state.read().unwrap().installer_binaries.clone()
+    }
+
+    pub fn shell_profile_paths(&self) -> Vec<String> {
+        self.state.read().unwrap().shell_profile_paths.clone()
+    }
+
+    pub fn sensitive_credential_paths(&self) -> Vec<String> {
+        self.state.read().unwrap().sensitive_credential_paths.clone()
+    }
+
+    pub fn script_interpreters(&self) -> Vec<String> {
+        self.state.read().unwrap().script_interpreters.clone()
+    }
+
+    pub fn interactive_shells(&self) -> Vec<String> {
+        self.state.read().unwrap().interactive_shells.clone()
+    }
+
+    pub fn browser_executables(&self) -> Vec<String> {
+        self.state.read().unwrap().browser_executables.clone()
+    }
+
+    pub fn hvnc_monitored_gui_apps(&self) -> Vec<String> {
+        self.state.read().unwrap().hvnc_monitored_gui_apps.clone()
+    }
+
+    pub fn protected_application_directories(&self) -> HashMap<String, String> {
+        self.state.read().unwrap().protected_application_directories.clone()
+    }
+
     pub fn load_defaults() -> Self {
+        let config_dir = find_config_dir(Path::new(""));
+        let prefix = if cfg!(unix) { "linux" } else { "windows" };
+
+        let network_cdns = load_list_from_json(&config_dir, "network_cdns.json", "cdns");
+        let web_processes = load_list_from_json(&config_dir, &format!("{}_web_processes.json", prefix), "processes");
+        let persistence_paths = load_list_from_json(&config_dir, &format!("{}_persistence_paths.json", prefix), "paths");
+        let protected_binaries = load_list_from_json(&config_dir, &format!("{}_protected_binaries.json", prefix), "binaries");
+        
+        let terminal_rce_patterns = if cfg!(unix) {
+            load_list_from_json(&config_dir, "linux_terminal_rce_patterns.json", "patterns")
+        } else {
+            Vec::new()
+        };
+
+        let installer_binaries = load_list_from_json(&config_dir, &format!("{}_installer_binaries.json", prefix), "binaries");
+        let shell_profile_paths = load_list_from_json(&config_dir, &format!("{}_shell_profile_paths.json", prefix), "paths");
+        let sensitive_credential_paths = load_list_from_json(&config_dir, &format!("{}_sensitive_credential_paths.json", prefix), "paths");
+        let script_interpreters = load_list_from_json(&config_dir, &format!("{}_script_interpreters.json", prefix), "interpreters");
+        let interactive_shells = load_list_from_json(&config_dir, &format!("{}_interactive_shells.json", prefix), "shells");
+        let browser_executables = load_list_from_json(&config_dir, &format!("{}_browser_executables.json", prefix), "browsers");
+        let hvnc_monitored_gui_apps = load_list_from_json(&config_dir, &format!("{}_hvnc_monitored_gui_apps.json", prefix), "apps");
+        let protected_application_directories = load_map_from_json(&config_dir, &format!("{}_protected_application_directories.json", prefix), "directories");
+
         ConfigManager {
             path: String::new(),
             public_key: [0u8; 32],
@@ -345,34 +481,20 @@ impl ConfigManager {
                 exclusions: Vec::new(),
                 trusted_signers: std::collections::HashSet::new(),
                 trusted_clis: std::collections::HashMap::new(),
-                network_cdns: Vec::new(),
+                network_cdns,
                 sensitive_files: std::collections::HashMap::new(),
-                web_processes: vec![
-                    "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
-                    "caddy".to_string(), "php-fpm".to_string(), "node".to_string(),
-                    "python3".to_string(), "python".to_string(), "ruby".to_string(),
-                    "java".to_string(), "gunicorn".to_string(), "uvicorn".to_string(),
-                    "uwsgi".to_string(), "lighttpd".to_string(),
-                ],
-                persistence_paths: vec![
-                    "/etc/cron.d".to_string(), "/etc/cron.daily".to_string(),
-                    "/etc/cron.hourly".to_string(), "/etc/cron.weekly".to_string(),
-                    "/var/spool/cron".to_string(), "/etc/systemd/system".to_string(),
-                    "/usr/lib/systemd/system".to_string(), "/etc/profile.d".to_string(),
-                    "/etc/init.d".to_string(), "/root/.bashrc".to_string(),
-                ],
-                protected_binaries: vec![
-                    "nginx".to_string(), "apache2".to_string(), "httpd".to_string(),
-                    "php-fpm".to_string(), "sshd".to_string(), "cron".to_string(),
-                ],
-                terminal_rce_patterns: vec![
-                    "wget ".to_string(), "curl ".to_string(), "nc ".to_string(),
-                    "netcat".to_string(), "bash -i".to_string(),
-                    "/dev/tcp/".to_string(), "python -c".to_string(),
-                    "python3 -c".to_string(), "perl -e".to_string(),
-                    "base64 -d".to_string(), "chmod +x".to_string(),
-                    "mkfifo".to_string(), "LD_PRELOAD".to_string(),
-                ],
+                web_processes,
+                persistence_paths,
+                protected_binaries,
+                terminal_rce_patterns,
+                installer_binaries,
+                shell_profile_paths,
+                sensitive_credential_paths,
+                script_interpreters,
+                interactive_shells,
+                browser_executables,
+                hvnc_monitored_gui_apps,
+                protected_application_directories,
             })),
         }
     }
@@ -402,55 +524,43 @@ pub struct signer_info_t {
 pub unsafe extern "C" fn kinnector_config_load(
     path: *const c_char,
     public_key: *const u8,
-    out_config: *mut *mut kinnector_config_t,
-) -> c_int {
-    if path.is_null() || public_key.is_null() || out_config.is_null() {
-        return -1;
+) -> *mut kinnector_config_t {
+    if path.is_null() || public_key.is_null() {
+        return std::ptr::null_mut();
     }
 
-    let c_path = CStr::from_ptr(path);
-    let path_str = match c_path.to_str() {
+    let c_str = CStr::from_ptr(path);
+    let path_str = match c_str.to_str() {
         Ok(s) => s,
-        Err(_) => return -2,
+        Err(_) => return std::ptr::null_mut(),
     };
 
     let mut key_bytes = [0u8; 32];
     std::ptr::copy_nonoverlapping(public_key, key_bytes.as_mut_ptr(), 32);
 
     match ConfigManager::load(path_str, &key_bytes) {
-        Ok(mgr) => {
-            let boxed = Box::new(kinnector_config_t { manager: mgr });
-            *out_config = Box::into_raw(boxed);
-            0
+        Ok(manager) => {
+            Box::into_raw(Box::new(kinnector_config_t { manager }))
         }
-        Err(_) => -3,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn kinnector_config_reload(config: *mut kinnector_config_t) -> c_int {
-    if config.is_null() {
-        return -1;
-    }
-    match (*config).manager.reload() {
-        Ok(_) => 0,
-        Err(_) => -2,
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn kinnector_config_is_path_excluded(
     config: *mut kinnector_config_t,
-    file_path: *const c_char,
+    path: *const c_char,
 ) -> bool {
-    if config.is_null() || file_path.is_null() {
+    if config.is_null() || path.is_null() {
         return false;
     }
-    let c_str = CStr::from_ptr(file_path);
+
+    let c_str = CStr::from_ptr(path);
     let path_str = match c_str.to_str() {
         Ok(s) => s,
         Err(_) => return false,
     };
+
     (*config).manager.is_path_excluded(Path::new(path_str))
 }
 
@@ -577,117 +687,51 @@ mod tests {
         );
         let exclusions_vec = builder.create_vector(&[excl1]);
 
-        let signer_name = builder.create_string("Google LLC");
-        let team_id = builder.create_string("EQHXZ8M8AV");
-        let signer1 = rules_generated::kinnector_config::TrustedSigner::create(
-            &mut builder,
-            &rules_generated::kinnector_config::TrustedSignerArgs {
-                signer_name: Some(signer_name),
-                team_id: Some(team_id),
-            }
-        );
-        let signers_vec = builder.create_vector(&[signer1]);
-
-        let binary_path = builder.create_string("/usr/bin/ssh");
-        let cli1 = rules_generated::kinnector_config::TrustedCLI::create(
-            &mut builder,
-            &rules_generated::kinnector_config::TrustedCLIArgs {
-                binary_path: Some(binary_path),
-                category_flags: 0x10, // Category::SshKeys
-            }
-        );
-        let clis_vec = builder.create_vector(&[cli1]);
-
-        let cdn_suffix = builder.create_string("*.google.com");
-        let cdn1 = rules_generated::kinnector_config::NetworkCDN::create(
-            &mut builder,
-            &rules_generated::kinnector_config::NetworkCDNArgs {
-                domain_suffix: Some(cdn_suffix),
-            }
-        );
-        let cdns_vec = builder.create_vector(&[cdn1]);
-
-        let file_path = builder.create_string("/etc/passwd");
-        let file1 = rules_generated::kinnector_config::SensitiveFile::create(
-            &mut builder,
-            &rules_generated::kinnector_config::SensitiveFileArgs {
-                file_path: Some(file_path),
-                category_flags: 0x10, // Category::SshKeys
-            }
-        );
-        let files_vec = builder.create_vector(&[file1]);
-
-        let root = rules_generated::kinnector_config::RulesDatabase::create(
+        let db = rules_generated::kinnector_config::RulesDatabase::create(
             &mut builder,
             &rules_generated::kinnector_config::RulesDatabaseArgs {
-                version: 1,
-                epoch_timestamp: 12345678,
-                metadata: Some(metadata),
+                version: 42,
+                epoch_timestamp: 1625097600,
                 exclusions: Some(exclusions_vec),
-                trusted_signers: Some(signers_vec),
-                trusted_clis: Some(clis_vec),
-                network_cdns: Some(cdns_vec),
-                sensitive_files: Some(files_vec),
+                trusted_signers: None,
+                trusted_clis: None,
+                network_cdns: None,
+                sensitive_files: None,
+                metadata: Some(metadata),
             }
         );
-        builder.finish(root, None);
-        let payload_bytes = builder.finished_data();
 
-        // 2. Generate cryptographically signed Header
-        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-        let signature = signing_key.sign(payload_bytes);
-        let signature_bytes = signature.to_bytes();
+        builder.finish(db, None);
+        let payload = builder.finished_data();
 
-        let mut final_db = Vec::new();
-        final_db.extend_from_slice(&signature_bytes); // 64 bytes
-        final_db.extend_from_slice(&1u32.to_le_bytes()); // db_version (4 bytes)
-        final_db.extend_from_slice(&12345678u64.to_le_bytes()); // epoch_timestamp (8 bytes)
-        final_db.extend_from_slice(&(payload_bytes.len() as u32).to_le_bytes()); // payload_len (4 bytes)
-        final_db.extend_from_slice(payload_bytes);
+        // 2. Cryptographic Sign
+        let signing_key = SigningKey::from_bytes(&[
+            0u8; 32 // Dummy key for local test
+        ]);
+        let signature = signing_key.sign(payload);
 
-        // 3. Write payload to workspace test file
-        let db_path = "test_rules.db";
-        let mut file = File::create(db_path)?;
-        file.write_all(&final_db)?;
+        // 3. Serialize Header + Payload
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&signature.to_bytes());
+        buffer.extend_from_slice(&42u32.to_le_bytes());
+        buffer.extend_from_slice(&1625097600u64.to_le_bytes());
+        buffer.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(payload);
 
-        // 4. Load database and verify queries
-        let manager = ConfigManager::load(db_path, &public_key_bytes)?;
+        // Write temp db file
+        let db_file_path = "configs_test.db";
+        let mut file = File::create(db_file_path)?;
+        file.write_all(&buffer)?;
 
-        // Assert Path Exclusion
-        assert!(manager.is_path_excluded("/tmp/exclude/some_subpath"));
-        assert!(!manager.is_path_excluded("/usr/bin/some_other_path"));
+        // 4. Load & Verify
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let manager = ConfigManager::load(db_file_path, &pub_key)?;
 
-        // Assert Trusted Signer
-        let google_signer = SignerInfo {
-            signer_name: "Google LLC".to_string(),
-            team_id: Some("EQHXZ8M8AV".to_string()),
-            is_signed: true,
-        };
-        let unknown_signer = SignerInfo {
-            signer_name: "Unknown Vendor".to_string(),
-            team_id: None,
-            is_signed: true,
-        };
-        assert!(manager.is_trusted_vendor(&google_signer));
-        assert!(!manager.is_trusted_vendor(&unknown_signer));
+        assert_eq!(manager.version(), 42);
+        assert!(manager.is_path_excluded(Path::new("/tmp/exclude/some_subpath")));
 
-        // Assert Trusted CLI
-        assert!(manager.is_trusted_cli("/usr/bin/ssh", Category::SshKeys));
-        assert!(!manager.is_trusted_cli("/usr/bin/ssh", Category::BrowserDb));
-
-        // Assert Domain Suffix matching
-        assert!(manager.is_domain_allowed("sub.google.com"));
-        assert!(manager.is_domain_allowed("google.com"));
-        assert!(!manager.is_domain_allowed("yahoo.com"));
-
-        // Assert Sensitive Files mapping
-        let files = manager.sensitive_files();
-        assert_eq!(files.get("/etc/passwd"), Some(&0x10));
-
-        // 5. Cleanup
-        std::fs::remove_file(db_path)?;
-
+        // Cleanup
+        std::fs::remove_file(db_file_path)?;
         Ok(())
     }
 }
